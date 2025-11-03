@@ -1,8 +1,6 @@
 from captcha.image import ImageCaptcha
 from pathlib import Path
 import os
-from threading import Thread
-from time import sleep
 
 SAVE_ROOT = Path(__file__).parent / "dist"
 os.makedirs(SAVE_ROOT, exist_ok=True)
@@ -13,138 +11,33 @@ REPEAT = 2
 
 TOTAL = int( (len(SOURCE)**LENGTH)*REPEAT )
 
-PRINT_EVERY = 1000000
+PRINT_EVERY = 10000
 
-WORKERS = 20
+IC_GEN = ImageCaptcha()
 
-
-
-class Worker:
-	def __init__(self, master, pk):
-		self.pk = pk
-		self.master = master
-		self.imggen = ImageCaptcha()
-
-		self.print("Initialized")
-
-	def print(self, msg):
-		print(f"[W_{self.pk:02d}] {msg}")
-
-	def do_work(self, data:str):
-		#self.print(f"Working on: `{data}`")
-		for i in range(REPEAT):
-			self.imggen.write(
-				data,
-				SAVE_ROOT / f"{data}.{i}.png",
-			)
-
-	def run(self):
-		self.print("Running")
-
-		self._queue = list()
-		while True:
-			try:
-				if len(self._queue) > 0:
-					self.do_work(
-						self._queue.pop()
-					)
-			except AttributeError:
-				break
-
-		self.print("Stopped")
-
-	def stop(self):
-		# Let `run` Panic
-		self.print("Stopping...")
-		del self._queue
-
-class Master:
-	def __init__(self):
-		self.workers = [
-			Worker(master=self, pk=i)
-			for i in range(WORKERS)
-		]
-		self.workers_thread = list()
-
-	def print(self, msg):
-		print(f"[MNGR] {msg}")
-
-	def status(self):
-		#self.print("Current Status:")
-		self.print(f"Assigned `{100*REPEAT*self._curr/TOTAL:.04f}`% :: ({TOTAL-self.pending_tasks()}/{TOTAL})")
-		#for w in self.workers:
-		#	print(f"    - Worker {w.pk:02d}: `{len(w._queue)}` pending")
-
-	def assign_task(self, task:str):
-		self.workers[ self._curr%WORKERS ]._queue.append(task)
-		self._curr += 1
-
-	def start(self):
-		self._curr = 0
-		self.workers_thread = [
-			Thread(target=worker.run)
-			for worker in self.workers
-		]
-		try:
-			[
-				w_thrd.start()
-				for w_thrd in self.workers_thread
-			]
-			self.print("All Started")
-		except Exception as exc:
-			self.print(f"Panic Forced Stop: {exc}")
-			[
-				w.stop()
-				for w in self.workers
-			]
-
-	def stop(self, _forced=False):
-		try:
-			if not _forced:
-				while True:
-					if self.pending_tasks() <= 0:
-						break
-					self.status()
-					sleep(10)
-
-			[
-				w.stop()
-				for w in self.workers
-			]
-			[
-				w_thrd.join()
-				for w_thrd in self.workers_thread
-			]
-			self.print("Normal Stop")
-		except Exception as exc:
-			self.print(f"Panic While Stopping: {exc}")
-		self.print("All done")
-
-	def pending_tasks(self) -> int:
-		return REPEAT*sum([
-			len(w._queue)
-			for w in self.workers
-		])
+if PRINT_EVERY % REPEAT != 0:
+	raise Exception("Verbose unable to print")
 
 
-def build_on(prefix, current, verbose, dry_run, master):
+
+def build_on(prefix, current, verbose, dry_run):
 	if len(prefix) >= LENGTH:
 
 		if verbose and (current % PRINT_EVERY)==0:
-			#print(f"  - Progress {100*current/TOTAL:.02f} % ({current}/{TOTAL})")#, end="\r")
-			master.status()
+			print(f"  - Progress {100*current/TOTAL:.02f} % ({current}/{TOTAL})")#, end="\r")
 
 		if not dry_run:
-			master.assign_task(
-				task=prefix,
-				#current=current,
-			)
+			for i in range(REPEAT):
+				IC_GEN.write(
+					prefix,
+					SAVE_ROOT / f"{prefix}.{i}.png",
+				)
 
 		return prefix
 
 	l = list()
 	for c in SOURCE:
-		r = build_on(prefix=prefix+c, current=current, verbose=verbose, dry_run=dry_run, master=master)
+		r = build_on(prefix=prefix+c, current=current, verbose=verbose, dry_run=dry_run)
 		if type(r) == str:
 			l.append(
 				r
@@ -159,38 +52,21 @@ def build_on(prefix, current, verbose, dry_run, master):
 			raise Exception(f"Unexpected return type from `build_on`: `{type(r)}`({r})")
 	return l
 
-def build(verbose=False, dry_run=False, master=None):
-	if (not dry_run) and (master == None):
-		raise Exception("Must have `master` if not `dry_run`")
-
-	if not dry_run:
-		master.start()
-
+def build(verbose=False, dry_run=False):
 	current = 0
 	current += REPEAT * len(build_on(
 		prefix="",
 		current=current,
 		verbose=verbose,
 		dry_run=dry_run,
-		master=master,
 	))
 	if verbose:
-		#print(f"  - Progress {100*current/TOTAL:.02f} % ({current}/{TOTAL})")
-		master.status()
-
-	if not dry_run:
-		master.stop()
+		print(f"  - Progress {100*current/TOTAL:.02f} % ({current}/{TOTAL})")
 
 
 
 if __name__ == "__main__":
-	master = Master()
-
-	try:
-		build(
-			verbose=True,
-			dry_run=False,
-			master=master,
-		)
-	except KeyboardInterrupt:
-		master.stop(_forced=True)
+	build(
+		verbose=True,
+		dry_run=False,
+	)
