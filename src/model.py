@@ -7,17 +7,26 @@ from attn import GQAAttention, AttnConfig, SwiGLU
 from typing import Optional
 
 
-
 class Gemma3Block(nn.Module):
-    def __init__(self, d_model, n_heads, n_kv_heads, max_seq_len,
-                 is_local: bool, local_window: Optional[int],
-                 rope_base_local=10_000.0, rope_base_global=1_000_000.0,
-                 attn_dropout=0.0, mlp_ratio=4.0, qk_norm=True):
+    def __init__(
+        self,
+        d_model,
+        n_heads,
+        n_kv_heads,
+        max_seq_len,
+        is_local: bool,
+        local_window: Optional[int],
+        rope_base_local=10_000.0,
+        rope_base_global=1_000_000.0,
+        attn_dropout=0.0,
+        mlp_ratio=4.0,
+        qk_norm=True,
+    ):
         super().__init__()
         rope_base = rope_base_local if is_local else rope_base_global
         self.is_local = is_local
 
-        self.norm1 = RMSNorm(d_model)    # pre-norm
+        self.norm1 = RMSNorm(d_model)  # pre-norm
         self.attn = GQAAttention(
             AttnConfig(
                 d_model=d_model,
@@ -29,7 +38,7 @@ class Gemma3Block(nn.Module):
                 qk_norm=qk_norm,
             ),
             is_local=is_local,
-            window=local_window if is_local else None
+            window=local_window if is_local else None,
         )
         self.norm2 = RMSNorm(d_model)
         self.mlp = SwiGLU(d_model, int(d_model * mlp_ratio))
@@ -50,6 +59,7 @@ class Gemma3Model(nn.Module):
     Decoder-only Transformer with 5:1 local:global interleaving.
     Optionally accepts 'vision_tokens' of shape [B, V=256, d_model] to prepend.
     """
+
     def __init__(
         self,
         vocab_size: int,
@@ -59,13 +69,13 @@ class Gemma3Model(nn.Module):
         n_kv_heads: int = 8,
         max_seq_len: int = 128_000,
         local_window: int = 1024,
-        l2g: int = 5,                # 5 locals then 1 global
+        l2g: int = 5,  # 5 locals then 1 global
         attn_dropout: float = 0.0,
         mlp_ratio: float = 4.0,
         qk_norm: bool = True,
         tie_embedding: bool = True,
         vision_enabled: bool = True,
-        vision_tokens: int = 256
+        vision_tokens: int = 256,
     ):
         super().__init__()
         self.vocab_size = vocab_size
@@ -81,7 +91,9 @@ class Gemma3Model(nn.Module):
 
         # Build interleaved stack: start with local
         for i in range(n_layers):
-            is_local = ((i % (l2g + 1)) != l2g)  # e.g., for l2g=5: indices 0-4 local, 5 global, 6-10 local, 11 global, ...
+            is_local = (
+                (i % (l2g + 1)) != l2g
+            )  # e.g., for l2g=5: indices 0-4 local, 5 global, 6-10 local, 11 global, ...
             self.layers.append(
                 Gemma3Block(
                     d_model=d_model,
@@ -103,13 +115,15 @@ class Gemma3Model(nn.Module):
 
         # Simple projector for vision embeddings (assuming SigLIP output already provided)
         if vision_enabled:
-            self.vision_proj = nn.Linear(d_model, d_model, bias=False)  # identity-sized; adjust if your SigLIP dim differs
+            self.vision_proj = nn.Linear(
+                d_model, d_model, bias=False
+            )  # identity-sized; adjust if your SigLIP dim differs
 
     def forward(
         self,
-        input_ids: torch.Tensor,            # [B, T_text]
+        input_ids: torch.Tensor,  # [B, T_text]
         vision_embeds: Optional[torch.Tensor] = None,  # [B, 256, d_v] if provided
-        kv_cache: Optional[list] = None,    # list of (k,v) per layer for fast decode
+        kv_cache: Optional[list] = None,  # list of (k,v) per layer for fast decode
     ):
         B, T_txt = input_ids.shape
         x = self.embed(input_ids)  # [B, T_text, d]

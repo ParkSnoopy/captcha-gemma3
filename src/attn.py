@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 
-
 @dataclass
 class AttnConfig:
     d_model: int
@@ -25,6 +24,7 @@ class QKNorm(nn.Module):
     Simple, stable QK-norm: L2-normalize q and k, then scale by a learned gamma.
     This mirrors the 'QK-norm' idea used instead of soft-capping in Gemma 3.
     """
+
     def __init__(self, head_dim: int, eps=1e-6):
         super().__init__()
         self.eps = eps
@@ -42,6 +42,7 @@ class GQAAttention(nn.Module):
     """
     Grouped-Query Attention (shared K/V across head groups) with RoPE and optional sliding-window mask.
     """
+
     def __init__(self, cfg: AttnConfig, is_local: bool, window: Optional[int]):
         super().__init__()
         self.cfg = cfg
@@ -51,7 +52,7 @@ class GQAAttention(nn.Module):
         d = cfg.d_model
         h = cfg.n_heads
         hk = cfg.n_kv_heads
-        hd = d // h                          # head dim
+        hd = d // h  # head dim
         self.h = h
         self.hk = hk
         self.hd = hd
@@ -63,9 +64,7 @@ class GQAAttention(nn.Module):
 
         self.attn_drop = nn.Dropout(cfg.attn_dropout)
 
-        self.rope = RoPECache(head_dim=hd,
-                              base=cfg.rope_base,
-                              max_len=cfg.max_seq_len)
+        self.rope = RoPECache(head_dim=hd, base=cfg.rope_base, max_len=cfg.max_seq_len)
 
         self.qk_norm = QKNorm(hd) if cfg.qk_norm else None
 
@@ -83,7 +82,9 @@ class GQAAttention(nn.Module):
         full = causal | sw
         return full  # True => -inf
 
-    def forward(self, x: torch.Tensor, kv: Optional[Tuple[torch.Tensor, torch.Tensor]] = None):
+    def forward(
+        self, x: torch.Tensor, kv: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+    ):
         """
         x: [B, T, d]
         kv (optional): external KV to use (past cache). If provided, expected shapes:
@@ -130,15 +131,17 @@ class GQAAttention(nn.Module):
 
         # Masks: causal + optional sliding window
         if self.is_local and self.window is not None:
-            bad = self._sliding_window_mask(att.size(-1), device)  # [T_kv, T_kv] but we query full prefixes
+            bad = self._sliding_window_mask(
+                att.size(-1), device
+            )  # [T_kv, T_kv] but we query full prefixes
             # We need mask aligned on [T (query), T_kv (key)]. For autoregressive prefill, T==T_kv.
-            att = att.masked_fill(bad.unsqueeze(0).unsqueeze(0), float('-inf'))
+            att = att.masked_fill(bad.unsqueeze(0).unsqueeze(0), float("-inf"))
         else:
             # causal mask (no future)
             i = torch.arange(att.size(-2), device=device)
             j = torch.arange(att.size(-1), device=device)
             causal = j > i.unsqueeze(-1)
-            att = att.masked_fill(causal.unsqueeze(0).unsqueeze(0), float('-inf'))
+            att = att.masked_fill(causal.unsqueeze(0).unsqueeze(0), float("-inf"))
 
         p = F.softmax(att, dim=-1)
         p = self.attn_drop(p)
@@ -148,8 +151,8 @@ class GQAAttention(nn.Module):
 
         # For local layers we can drop old cache beyond window to save memory
         if self.is_local and self.window is not None and k.size(2) > self.window:
-            k = k[:, :, -self.window:]
-            v = v[:, :, -self.window:]
+            k = k[:, :, -self.window :]
+            v = v[:, :, -self.window :]
 
         return y, (k, v)
 

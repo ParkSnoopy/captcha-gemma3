@@ -2,10 +2,10 @@ import torch
 import torch.nn as nn
 
 
-
 def rotate_half(x):
     x1, x2 = x.chunk(2, dim=-1)
     return torch.cat((-x2, x1), dim=-1)
+
 
 def apply_rope(q, k, cos, sin):
     # q,k: [B, n_heads, T, head_dim], cos/sin broadcastable to that
@@ -31,6 +31,7 @@ class RoPECache:
     Builds cos/sin caches for RoPE with a specified base.
     We keep separate caches for local/global (different bases).
     """
+
     def __init__(self, head_dim: int, base: float, max_len: int, device=None):
         assert head_dim % 2 == 0
         self.head_dim = head_dim
@@ -40,9 +41,13 @@ class RoPECache:
 
         half = head_dim // 2
         # theta shape: [half]
-        theta = 1.0 / (base ** (torch.arange(0, half, dtype=torch.float32, device=device) / half))
+        theta = 1.0 / (
+            base ** (torch.arange(0, half, dtype=torch.float32, device=device) / half)
+        )
         # positions: [max_len, 1]
-        pos = torch.arange(max_len, device=device, dtype=torch.float32).unsqueeze(1)  # [T, 1]
+        pos = torch.arange(max_len, device=device, dtype=torch.float32).unsqueeze(
+            1
+        )  # [T, 1]
         freqs = pos * theta  # [T, half]
         self.cos = torch.cos(freqs).repeat_interleave(2, dim=1)  # [T, head_dim]
         self.sin = torch.sin(freqs).repeat_interleave(2, dim=1)
