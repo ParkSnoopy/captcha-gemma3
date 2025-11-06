@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
+from torchvision.transforms.functional import to_tensor
 from PIL import Image
 
 # Import your model code
@@ -102,21 +103,15 @@ class CaptchaDataset(Dataset):
         return len(self.items)
 
     def _load_img(self, path: Path):
-        # grayscale, resize to (H,W) = (100,250) default
+        # grayscale, resize to (H,W) = (100,250)
         img = (
             Image.open(path)
             .convert("L")
-            .resize((self.img_size[1], self.img_size[0]), Image.BILINEAR)
+            .resize(
+                (self.img_size[1], self.img_size[0]), Image.BILINEAR
+            )  # (W,H) for PIL
         )
-        # to tensor [0,1], shape [1,H,W]
-        x = torch.from_numpy(
-            (
-                torch.ByteTensor(torch.ByteStorage.from_buffer(img.tobytes())).float()
-                / 255.0
-            ).numpy()
-        )
-        x = x.view(self.img_size[0], self.img_size[1])  # [H,W]
-        x = x.unsqueeze(0)  # [1,H,W]
+        x = to_tensor(img)  # -> [1, H, W], float32 in [0,1]
         return x
 
     def __getitem__(self, idx):
