@@ -53,7 +53,11 @@ class RoPECache:
         self.sin = torch.sin(freqs).repeat_interleave(2, dim=1)
 
     def get(self, t: int):
-        # returns cos/sin for sequence length t: [t, 1, 1, head_dim] for easy broadcast
-        cos = self.cos[:t].unsqueeze(1).unsqueeze(1)
-        sin = self.sin[:t].unsqueeze(1).unsqueeze(1)
+        # from:
+        # cos = self.cos[:t].unsqueeze(1).unsqueeze(1)
+        # sin = self.sin[:t].unsqueeze(1).unsqueeze(1)
+
+        # to (shapes -> [1,1,T,D]):
+        cos = self.cos[:t].unsqueeze(0).unsqueeze(0)
+        sin = self.sin[:t].unsqueeze(0).unsqueeze(0)
         return cos, sin
