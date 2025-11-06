@@ -1,10 +1,12 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
-from util import RoPECache
+from util import RoPECache, apply_rope
 
 from dataclasses import dataclass
 from typing import Optional, Tuple
+import math
 
 
 @dataclass

@@ -1,9 +1,6 @@
 import argparse
-import os
 from pathlib import Path
-import math
-import random
-from typing import Optional, List, Tuple
+from typing import List
 
 import torch
 import torch.nn as nn
@@ -184,7 +181,6 @@ def train(args):
         args.data,
         charset=DEFAULT_CHARSET,
         img_size=(args.height, args.width),
-        use_csv=not args.no_csv,
     )
     itos, stoi = ds.itos, ds.stoi
     print(f"Vocab size: {len(itos)}  (includes PAD and BOS)")
@@ -227,7 +223,7 @@ def train(args):
     opt = torch.optim.AdamW(
         model.parameters(), lr=args.lr, weight_decay=0.1, betas=(0.9, 0.95)
     )
-    scaler = torch.cuda.amp.GradScaler(enabled=args.amp)
+    scaler = torch.amp.GradScaler(str(device), enabled=args.amp)
 
     # Train
     model.train()
@@ -238,7 +234,7 @@ def train(args):
             text_ids = text_ids.to(device)
 
             # Vision -> tokens
-            with torch.cuda.amp.autocast(enabled=args.amp):
+            with torch.amp.autocast(str(device), enabled=args.amp):
                 vtok = patcher(imgs)  # [B, V, d_model]
                 logits, _ = model(input_ids=text_ids, vision_embeds=vtok, kv_cache=None)
                 loss = compute_autoregressive_loss(
@@ -317,7 +313,7 @@ def parse_args():
         "--data",
         type=str,
         required=True,
-        help="Folder with images and optional labels.csv",
+        help="Folder with images",
     )
     p.add_argument(
         "--out", type=str, default="checkpoints", help="Where to save checkpoints"
@@ -337,7 +333,7 @@ def parse_args():
     # image + patch
     p.add_argument("--height", type=int, default=100)
     p.add_argument("--width", type=int, default=250)
-    p.add_argument("--patch", type=int, default=10)
+    p.add_argument("--patch", type=int, default=25)
 
     # model size
     p.add_argument("--d_model", type=int, default=512)
