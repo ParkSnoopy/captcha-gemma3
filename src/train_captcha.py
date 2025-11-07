@@ -314,36 +314,55 @@ def train(args):
 def predict_batch(
     images: torch.Tensor,
     model: Gemma3Model,
-    patcher: PatchEmbed,
+    patcher,
     stoi: dict,
-    itos: list,
-    max_len=4,
-    device="cpu",
+    itos: List[str],
+    max_len: int = 4,
+    device: str = "cpu",
 ):
     model.eval()
-    bos_id = stoi[BOS_TOKEN]
-    vtok = patcher(images.to(device=device, dtype=torch.float32))  # [B, V, d]
+    bos_id = stoi["<bos>"]
+    vtok = patcher(images.to(device=device, dtype=torch.float32))
     B = images.size(0)
 
-    # 2) step 0: feed BOS + vision (no cache yet)
-    seq = torch.full((B, 1), bos_id, dtype=torch.long, device=device)  # [B,1]
+    # prefill: BOS + vision
+    seq = torch.full((B, 1), bos_id, dtype=torch.long, device=device)
     logits, kv_cache = model(input_ids=seq, vision_embeds=vtok, kv_cache=None)
-    next_id = logits[:, -1, 2:].argmax(dim=-1) + 2  # skip PAD=0, BOS=1
+
+    def pick_next(log):
+        # Why: avoid slicing bias; explicitly disallow PAD/BOS.
+        log = log.clone()
+        log[..., :2] = float("-inf")
+        return log.argmax(dim=-1)
+
+    next_id = pick_next(logits[:, -1, :])
     out_ids = [next_id]
 
-    # 3) remaining steps: feed only the last generated token; no vision
     for _ in range(1, max_len):
         logits, kv_cache = model(
-            input_ids=next_id.unsqueeze(1),  # [B,1]
-            vision_embeds=None,  # <- important: don't re-add vision
+            input_ids=next_id.unsqueeze(1),
+            vision_embeds=None,
             kv_cache=kv_cache,
         )
-        next_id = logits[:, -1, 2:].argmax(dim=-1) + 2
+        next_id = pick_next(logits[:, -1, :])
         out_ids.append(next_id)
 
-    outputs = torch.stack(out_ids, dim=1)  # [B, 4]
+    outputs = torch.stack(out_ids, dim=1)  # [B, max_len]
     preds = ["".join(itos[i.item()] for i in row) for row in outputs]
     return preds
+
+
+"""
+def debug_first_step_logits(images, model, patcher, stoi, k=5, device="cpu"):
+    with torch.no_grad():
+        bos_id = stoi["<bos>"]
+        vtok = patcher(images.to(device=device, dtype=torch.float32))
+        seq = torch.full((images.size(0), 1), bos_id, dtype=torch.long, device=device)
+        logits, _ = model(input_ids=seq, vision_embeds=vtok, kv_cache=None)
+        log = logits[:, -1, :].mean(dim=0)  # mean over batch
+        top = torch.topk(log, k)
+        return [(i.item(), float(v)) for v, i in zip(top.values, top.indices)]
+"""
 
 
 def parse_args(args=None):
@@ -389,7 +408,6 @@ if __name__ == "__main__":
     args = """
         --data ./data/
         --batch-size 16
-        --log-every 50
     """
     args = parse_args(
         # args=list(filter(lambda x: x != "", args.split())),
