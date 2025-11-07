@@ -1,6 +1,6 @@
 [project]
 name = "gemma3-lo"
-version = "0.1.1"
+version = "0.1.2"
 description = "Gemma 3 Impl"
 requires-python = ">=3.12"
 dependencies = [
