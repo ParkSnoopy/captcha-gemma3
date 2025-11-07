@@ -304,6 +304,7 @@ def predict_batch(
 
 def parse_args(args=None):
     p = argparse.ArgumentParser()
+
     p.add_argument(
         "--data",
         type=str,
@@ -339,7 +340,7 @@ def parse_args(args=None):
 
 if __name__ == "__main__":
     args = """
-        --data data/
+        --data ./data/
         --batch-size 16
         --log-every 50
     """
