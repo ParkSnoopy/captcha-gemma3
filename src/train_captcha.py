@@ -1,13 +1,14 @@
+import random
 import argparse
 from tqdm.auto import tqdm, trange
 
 from pathlib import Path
-from typing import List
+from typing import List, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, random_split
 from torchvision.transforms.functional import to_tensor
 from PIL import Image
 
@@ -166,34 +167,116 @@ def compute_autoregressive_loss(logits, text_ids, vision_len, ignore_index=-100)
     return loss
 
 
-# -----------------------
-# Training
-# -----------------------
-def train(args):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
-
-    # Data
+# ---- data helpers ----
+def make_dataloaders(args, device):
+    g = torch.Generator().manual_seed(args.seed)
     ds = CaptchaDataset(
         args.data,
         charset=DEFAULT_CHARSET,
         img_size=(args.height, args.width),
     )
     itos, stoi = ds.itos, ds.stoi
-    print(f"Vocab size: {len(itos)}  (includes PAD and BOS)")
+
+    if args.no_val:
+        train_set, val_set = ds, None
+    else:
+        n_val = max(1, int(len(ds) * args.val_split))
+        n_train = len(ds) - n_val
+        train_set, val_set = random_split(ds, [n_train, n_val], generator=g)
+
     train_loader = DataLoader(
-        ds,
+        train_set,
         batch_size=args.batch_size,
         shuffle=True,
-        num_workers=0,
+        num_workers=4,
+        pin_memory=(device.type == "cuda"),
         collate_fn=lambda b: collate_fn(b, stoi),
+        drop_last=True,
     )
+    val_loader = None
+    if val_set is not None:
+        val_loader = DataLoader(
+            val_set,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=2,
+            pin_memory=(device.type == "cuda"),
+            collate_fn=lambda b: collate_fn(b, stoi),
+            drop_last=False,
+        )
+    return train_loader, val_loader, itos, stoi
+
+
+# ---- metrics ----
+def token_and_seq_accuracy(preds: List[str], targets: List[str]) -> Tuple[float, float]:
+    correct_seq = sum(p == t for p, t in zip(preds, targets))
+    seq_acc = correct_seq / max(1, len(preds))
+    total_tok = sum(len(t) for t in targets)
+    correct_tok = sum(
+        sum(pi == ti for pi, ti in zip(p, t)) for p, t in zip(preds, targets)
+    )
+    tok_acc = correct_tok / max(1, total_tok)
+    return tok_acc, seq_acc
+
+
+# ---- validation loop ----
+@torch.no_grad()
+def validate(model, patcher, loader, stoi, itos, device, max_len=4, no_tqdm=False):
+    model.eval()
+    losses = []
+    preds_all, targs_all = [], []
+    data_iter = (
+        loader
+        if no_tqdm
+        else tqdm(loader, desc="Validate", leave=False, dynamic_ncols=True)
+    )
+    for imgs, text_ids, raw in data_iter:
+        imgs = imgs.to(device=device, dtype=torch.float32)
+        text_ids = text_ids.to(device)
+        vtok = patcher(imgs)
+        logits, _ = model(input_ids=text_ids, vision_embeds=vtok, kv_cache=None)
+        loss = compute_autoregressive_loss(
+            logits, text_ids, vision_len=patcher.tokens, ignore_index=-100
+        )
+        losses.append(loss.item())
+        # decode
+        batch_preds = predict_batch(
+            imgs, model, patcher, stoi, itos, max_len=max_len, device=device
+        )
+        preds_all.extend(batch_preds)
+        # recover targets as strings
+        targs = [
+            "".join(itos[j.item()] for j in row[1 : 1 + max_len]) for row in text_ids
+        ]  # skip BOS
+        targs_all.extend(targs)
+    tok_acc, seq_acc = token_and_seq_accuracy(preds_all, targs_all)
+    return float(sum(losses) / max(1, len(losses))), tok_acc, seq_acc
+
+
+# -----------------------
+# Training
+# -----------------------
+def train(args):
+    # set seed
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    # Data
+    train_loader, val_loader, itos, stoi = make_dataloaders(args, device)
+    print(
+        f"Dataset size: train={len(train_loader.dataset)} val={0 if val_loader is None else len(val_loader.dataset)}"
+    )
+    print(f"Vocab size: {len(itos)}")
 
     # Vision tokens via PatchEmbed
-    patch = args.patch
-    d_model = args.d_model
     patcher = PatchEmbed(
-        img_size=(args.height, args.width), patch=patch, in_chans=1, d_model=d_model
+        img_size=(args.height, args.width),
+        patch=args.patch,
+        in_chans=args.n_channel,
+        d_model=args.d_model,
     ).to(device)
     vision_tokens = patcher.tokens
     print(f"Vision tokens per image: {vision_tokens}")
@@ -201,14 +284,14 @@ def train(args):
     # Model
     model = Gemma3Model(
         vocab_size=len(itos),
-        d_model=d_model,
+        d_model=args.d_model,
         n_layers=args.n_layers,
         n_heads=args.n_heads,
         n_kv_heads=args.n_kv_heads,
         max_seq_len=max(1024, vision_tokens + 16),
         local_window=args.local_window,
         l2g=args.l2g,
-        attn_dropout=0.0,
+        attn_dropout=args.dropout,
         mlp_ratio=args.mlp_ratio,
         qk_norm=True,
         tie_embedding=True,
@@ -217,14 +300,22 @@ def train(args):
     ).to(device)
 
     # Optimizer
-    opt = torch.optim.AdamW(
-        model.parameters(), lr=args.lr, weight_decay=0.1, betas=(0.9, 0.95)
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=args.learning_rate,
+        weight_decay=args.weight_decay,
+        betas=(0.9, 0.95),
     )
     scaler = torch.amp.GradScaler(str(device), enabled=args.amp)
+    schedular = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="min", patience=1, factor=0.5, verbose=False
+    )
 
     # Train
     model.train()
     global_step = 0
+    best_seq_acc = -1.0
+    epochs_no_improve = 0
 
     epoch_iter = (
         range(args.epochs)
@@ -263,9 +354,9 @@ def train(args):
             total_norm = torch.nn.utils.clip_grad_norm_(
                 model.parameters(), args.grad_clip
             ).item()
-            scaler.step(opt)
+            scaler.step(optimizer)
             scaler.update()
-            opt.zero_grad(set_to_none=True)
+            optimizer.zero_grad(set_to_none=True)
 
             if not args.no_tqdm:
                 mem = (
@@ -274,7 +365,7 @@ def train(args):
                 data_iter.set_postfix(
                     loss=f"{loss.item():.4f}",
                     gnorm=f"{total_norm:.2f}",
-                    lr=f"{opt.param_groups[0]['lr']:.2e}",
+                    lr=f"{optimizer.param_groups[0]['lr']:.2e}",
                     mem=f"{mem:.2f} MB",
                 )
             else:
@@ -288,25 +379,60 @@ def train(args):
 
             global_step += 1
 
-        # (optional) save checkpoint per epoch
-        if args.out:
-            ckpt_path = Path(args.out) / f"captcha_gemma3_e{epoch + 1}.pt"
-            ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+        # ---- end epoch: validate/save ----
+        val_loss, tok_acc, seq_acc = (0.0, 0.0, 0.0)
+        if val_loader is not None:
+            val_loss, tok_acc, seq_acc = validate(
+                model,
+                patcher,
+                val_loader,
+                stoi,
+                itos,
+                device,
+                max_len=4,
+                no_tqdm=args.no_tqdm,
+            )
+            schedular.step(val_loss)  # why: reduce LR when val stalls
+
+        # Save checkpoint
+        ckpt_path = Path(args.out) / f"captcha_gemma3_e{epoch + 1}_last.pt"
+        ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {
+                "model": model.state_dict(),
+                "patcher": patcher.state_dict(),
+                "stoi": stoi,
+                "itos": itos,
+                "args": vars(args) | {"vision_tokens": vision_tokens},
+                "epoch": epoch + 1,
+                "val_loss": val_loss,
+                "val_tok_acc": tok_acc,
+                "val_seq_acc": seq_acc,
+            },
+            ckpt_path,
+        )
+        (print if args.no_tqdm else tqdm.write)(f"Saved to '{ckpt_path}'")
+
+        # improve with `validation`
+        improved = (seq_acc > best_seq_acc) if val_loader is not None else True
+        if improved:
+            best_ckpt_path = Path(args.out) / f"captcha_gemma3_e{epoch + 1}_best.pt"
+            best_seq_acc = seq_acc
+            epochs_no_improve = 0
             torch.save(
-                {
-                    "model": model.state_dict(),
-                    "patcher": patcher.state_dict(),
-                    "stoi": stoi,
-                    "itos": itos,
-                    "args": vars(args),
-                },
-                ckpt_path,
+                torch.load(ckpt_path, map_location="cpu"), best_ckpt_path
+            )  # copy last->best
+            (print if args.no_tqdm else tqdm.write)(
+                f"Saved best: seq_acc={seq_acc:.3f}, tok_acc={tok_acc:.3f}, val_loss={val_loss:.4f}"
             )
-            (
-                print(f"Saved to '{ckpt_path}'")
-                if args.no_tqdm
-                else tqdm.write(f"Saved to '{ckpt_path}'")
+        else:
+            epochs_no_improve += 1
+            (print if args.no_tqdm else tqdm.write)(
+                f"No improvement: seq_acc={seq_acc:.3f}, tok_acc={tok_acc:.3f}, val_loss={val_loss:.4f}"
             )
+            if epochs_no_improve >= args.val_patience and not args.no_val:
+                print(f"Early stopping (patience={args.val_patience}).")
+                break
 
     print("Done.")
 
@@ -372,6 +498,8 @@ def debug_first_step_logits(images, model, patcher, stoi, k=5, device="cpu"):
 def parse_args(args=None):
     p = argparse.ArgumentParser()
 
+    p.add_argument("--seed", type=int, default=random.randint(0, 1e20))
+
     p.add_argument(
         "--data",
         type=str,
@@ -383,8 +511,10 @@ def parse_args(args=None):
     )
     p.add_argument("--epochs", type=int, default=5)
     p.add_argument("--batch-size", type=int, default=32)
-    p.add_argument("--lr", type=float, default=3e-4)
+    p.add_argument("--learning-rate", type=float, default=3e-4)
+    p.add_argument("--weight-decay", type=float, default=0.1)
     p.add_argument("--grad-clip", type=float, default=1.0)
+    p.add_argument("--dropout", type=float, default=0.0)
     p.add_argument("--amp", action="store_true", help="Enable mixed precision")
 
     # logging
@@ -394,6 +524,7 @@ def parse_args(args=None):
     # image + patch
     p.add_argument("--height", type=int, default=100)
     p.add_argument("--width", type=int, default=250)
+    p.add_argument("--n-channels", type=int, default=1)
     p.add_argument("--patch", type=int, default=25)
 
     # model size
@@ -405,7 +536,13 @@ def parse_args(args=None):
     p.add_argument("--l2g", type=int, default=5)
     p.add_argument("--mlp-ratio", type=float, default=4.0)
 
-    return p.parse_args() if args is None else p.parse_args(args)
+    p.add_argument("--val-split", type=float, default=0.1)
+    p.add_argument("--val-patience", type=int, default=3)
+
+    args = p.parse_args() if args is None else p.parse_args(args)
+    args.no_val = args.val_split <= 0.0
+
+    return args
 
 
 if __name__ == "__main__":
