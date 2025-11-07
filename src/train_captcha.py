@@ -275,7 +275,7 @@ def train(args):
     patcher = PatchEmbed(
         img_size=(args.height, args.width),
         patch=args.patch,
-        in_chans=args.n_channel,
+        in_chans=args.n_channels,
         d_model=args.d_model,
     ).to(device)
     vision_tokens = patcher.tokens
@@ -308,7 +308,7 @@ def train(args):
     )
     scaler = torch.amp.GradScaler(str(device), enabled=args.amp)
     schedular = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", patience=1, factor=0.5, verbose=False
+        optimizer, mode="min", patience=args.train_patience, factor=0.5
     )
 
     # Train
@@ -498,7 +498,7 @@ def debug_first_step_logits(images, model, patcher, stoi, k=5, device="cpu"):
 def parse_args(args=None):
     p = argparse.ArgumentParser()
 
-    p.add_argument("--seed", type=int, default=random.randint(0, 1e20))
+    p.add_argument("--seed", type=int, default=random.randint(0, 999_999_999_999_999))
 
     p.add_argument(
         "--data",
@@ -536,11 +536,13 @@ def parse_args(args=None):
     p.add_argument("--l2g", type=int, default=5)
     p.add_argument("--mlp-ratio", type=float, default=4.0)
 
+    p.add_argument("--train-patience", type=int, default=float("inf"))
     p.add_argument("--val-split", type=float, default=0.1)
     p.add_argument("--val-patience", type=int, default=3)
 
     args = p.parse_args() if args is None else p.parse_args(args)
     args.no_val = args.val_split <= 0.0
+    args.train_patience = int(min(args.epochs, args.train_patience))
 
     return args
 
