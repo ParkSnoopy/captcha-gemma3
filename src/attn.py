@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from util import RoPECache, apply_rope
+from util import RoPECache, rotate_half  # <- rotate_half needed for local rope() helper
 
 from dataclasses import dataclass
 from typing import Optional, Tuple
@@ -22,10 +22,7 @@ class AttnConfig:
 
 
 class QKNorm(nn.Module):
-    """
-    Simple, stable QK-norm: L2-normalize q and k, then scale by a learned gamma.
-    This mirrors the 'QK-norm' idea used instead of soft-capping in Gemma 3.
-    """
+    """L2-normalize q and k, then scale by learned gamma. Keeps logits well-behaved."""
 
     def __init__(self, head_dim: int, eps=1e-6):
         super().__init__()
@@ -71,11 +68,9 @@ class GQAAttention(nn.Module):
         self.qk_norm = QKNorm(hd) if cfg.qk_norm else None
 
     def _sliding_window_mask(self, T: int, device):
-        # causal + window: allow attending only to last 'window' tokens
         i = torch.arange(T, device=device)
         j = torch.arange(T, device=device)
         mask = i.unsqueeze(1) - j.unsqueeze(0)  # [T, T]
-        # disallow j > i (future) OR (i-j) > window
         causal = mask < 0
         if self.window is None:
             sw = torch.zeros_like(mask, dtype=torch.bool)
@@ -83,6 +78,11 @@ class GQAAttention(nn.Module):
             sw = mask > self.window
         full = causal | sw
         return full  # True => -inf
+
+    @staticmethod
+    def _rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+        # Why: we need separate cos/sin for q (tail slice) vs k (full).
+        return (x * cos) + (rotate_half(x) * sin)
 
     def forward(
         self, x: torch.Tensor, kv: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
@@ -109,49 +109,57 @@ class GQAAttention(nn.Module):
         else:
             k, v = k_new, v_new
 
-        # Apply RoPE (different base per-attn module via cfg.rope_base)
-        cos, sin = self.rope.get(k.size(2))  # T_kv
-        # broadcast to [1, *, T, D]
-        cos = cos.to(x.dtype).to(device)
-        sin = sin.to(x.dtype).to(device)
+        # --- RoPE fix: apply correct positions to q (tail only) and k (full) ---
+        T_q = q.size(2)
+        T_kv = k.size(2)
+        # full cos/sin for all keys
+        cos_k, sin_k = self.rope.get(T_kv)
+        cos_k = cos_k.to(x.dtype).to(device)
+        sin_k = sin_k.to(x.dtype).to(device)
+        # tail slice for queries (new positions only)
+        cos_q = cos_k[..., -T_q:, :]
+        sin_q = sin_k[..., -T_q:, :]
 
-        # we only rotate first 2*floor(D/2) dims; our D is even by construction
-        q, k = apply_rope(q, k, cos, sin)
+        # apply separately: avoids 1->T_kv broadcast on q during decoding
+        q = self._rope(q, cos_q, sin_q)
+        k = self._rope(k, cos_k, sin_k)
 
-        # QK-norm (Gemma3 uses QK-norm instead of soft-capping)
+        # QK-norm
         if self.qk_norm is not None:
             q, k = self.qk_norm(q, k)
 
         # ---- keep HK version for the cache ----
         k_cache, v_cache = k, v
 
-        # Expand K/V across query heads (GQA): map hk -> h by repeating groups
-        # (each group of query heads shares one K/V head)
+        # Expand K/V across query heads (GQA)
         if H != HK:
             repeat = H // HK
-            k = k.repeat_interleave(repeat, dim=1)  # [B, H, T, D]
+            k = k.repeat_interleave(repeat, dim=1)  # [B, H, T_kv, D]
             v = v.repeat_interleave(repeat, dim=1)
 
-        att = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(D)  # [B, H, T, T_kv]
+        # attn
+        att = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(D)  # [B, H, T_q, T_kv]
 
         # Masks: causal + optional sliding window
         if self.is_local and self.window is not None and (kv is None):
-            bad = self._sliding_window_mask(
-                att.size(-1), device
-            )  # [T_kv, T_kv] but we query full prefixes
-            # We need mask aligned on [T (query), T_kv (key)]. For autoregressive prefill, T==T_kv.
+            bad = self._sliding_window_mask(att.size(-1), device)  # [T_kv, T_kv]
             att = att.masked_fill(bad.unsqueeze(0).unsqueeze(0), float("-inf"))
         else:
-            # generic causal mask for any (T, T_kv)
-            i = torch.arange(att.size(-2), device=device)
-            j = torch.arange(att.size(-1), device=device)
+            i = torch.arange(att.size(-2), device=device)  # T_q
+            j = torch.arange(att.size(-1), device=device)  # T_kv
             causal = j > i.unsqueeze(-1)
             att = att.masked_fill(causal.unsqueeze(0).unsqueeze(0), float("-inf"))
 
         p = F.softmax(att, dim=-1)
         p = self.attn_drop(p)
-        y = torch.matmul(p, v)  # [B, H, T, D]
-        y = y.transpose(1, 2).contiguous().view(B, T, H * D)
+        y = torch.matmul(p, v)  # [B, H, T_q, D]
+
+        # reshape (robust to any T_q)
+        y = y.transpose(1, 2).contiguous()
+        T_out = y.size(1)
+        # sanity (why: catch future mismatches early)
+        assert T_out == T_q, f"T_out({T_out}) != T_q({T_q})"
+        y = y.view(B, T_out, H * D)
         y = self.wo(y)
 
         # trim cache time dimension on the HK version
