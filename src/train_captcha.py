@@ -302,7 +302,7 @@ def predict_batch(
     return preds
 
 
-def parse_args():
+def parse_args(args=None):
     p = argparse.ArgumentParser()
     p.add_argument(
         "--data",
@@ -314,16 +314,11 @@ def parse_args():
         "--out", type=str, default="checkpoints", help="Where to save checkpoints"
     )
     p.add_argument("--epochs", type=int, default=5)
-    p.add_argument("--batch_size", type=int, default=32)
+    p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--lr", type=float, default=3e-4)
-    p.add_argument("--grad_clip", type=float, default=1.0)
+    p.add_argument("--grad-clip", type=float, default=1.0)
     p.add_argument("--amp", action="store_true", help="Enable mixed precision")
-    p.add_argument("--log_every", type=int, default=50)
-    p.add_argument(
-        "--no_csv",
-        action="store_true",
-        help="Ignore labels.csv and read labels from filenames",
-    )
+    p.add_argument("--log-every", type=int, default=50)
 
     # image + patch
     p.add_argument("--height", type=int, default=100)
@@ -331,16 +326,24 @@ def parse_args():
     p.add_argument("--patch", type=int, default=25)
 
     # model size
-    p.add_argument("--d_model", type=int, default=512)
-    p.add_argument("--n_layers", type=int, default=12)
-    p.add_argument("--n_heads", type=int, default=8)
-    p.add_argument("--n_kv_heads", type=int, default=4)
-    p.add_argument("--local_window", type=int, default=256)
+    p.add_argument("--d-model", type=int, default=512)
+    p.add_argument("--n-layers", type=int, default=12)
+    p.add_argument("--n-heads", type=int, default=8)
+    p.add_argument("--n-kv-heads", type=int, default=4)
+    p.add_argument("--local-window", type=int, default=256)
     p.add_argument("--l2g", type=int, default=5)
-    p.add_argument("--mlp_ratio", type=float, default=4.0)
-    return p.parse_args()
+    p.add_argument("--mlp-ratio", type=float, default=4.0)
+
+    return p.parse_args() if args is None else p.parse_args(args)
 
 
 if __name__ == "__main__":
-    args = parse_args()
+    args = """
+        --data data/
+        --batch-size 16
+        --log-every 50
+    """
+    args = parse_args(
+        args=list(filter(lambda x: x != "", args.split())),
+    )
     train(args)

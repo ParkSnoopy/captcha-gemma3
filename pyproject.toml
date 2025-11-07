@@ -9,6 +9,6 @@ dependencies = [
     "torchvision",
 
     # Normal Deps
-    "numpy>=2.3.4",
-    "pillow>=12.0.0",
+    "numpy>=2.3",
+    "pillow>=12.0",
 ]
