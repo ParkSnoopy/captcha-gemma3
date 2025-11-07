@@ -229,7 +229,7 @@ def train(args):
     epoch_iter = (
         range(args.epochs)
         if args.no_tqdm
-        else trange(args.epochs, desc="Epochs", leave=True)
+        else trange(args.epochs, desc="Train Progress", leave=True)
     )
 
     for epoch in epoch_iter:
@@ -241,7 +241,7 @@ def train(args):
                     train_loader,
                     total=len(train_loader),
                     leave=False,
-                    desc=f"Epoch {epoch + 1} ( Total {args.epochs} )",
+                    desc=f"Epoch {epoch + 1}",
                     dynamic_ncols=True,
                 )
             )
@@ -302,7 +302,11 @@ def train(args):
                 },
                 ckpt_path,
             )
-            print(f"Saved {ckpt_path}")
+            (
+                print(f"Saved to '{ckpt_path}'")
+                if args.no_tqdm
+                else tqdm.write(f"Saved to '{ckpt_path}'")
+            )
 
     print("Done.")
 
