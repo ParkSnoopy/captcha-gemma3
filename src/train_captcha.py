@@ -1,4 +1,6 @@
 import argparse
+from tqdm.auto import tqdm, trange
+
 from pathlib import Path
 from typing import List
 
@@ -223,8 +225,29 @@ def train(args):
     # Train
     model.train()
     global_step = 0
-    for epoch in range(args.epochs):
-        for imgs, text_ids, raw in train_loader:
+
+    epoch_iter = (
+        range(args.epochs)
+        if args.no_tqdm
+        else trange(args.epochs, desc="Epochs", leave=True)
+    )
+
+    for epoch in epoch_iter:
+        data_iter = (
+            train_loader
+            if args.no_tqdm
+            else (
+                tqdm(
+                    train_loader,
+                    total=len(train_loader),
+                    leave=False,
+                    desc=f"Epoch {epoch + 1} ( Total {args.epochs} )",
+                    dynamic_ncols=True,
+                )
+            )
+        )
+
+        for i, (imgs, text_ids, raw) in enumerate(data_iter):
             imgs = imgs.to(device=device, dtype=torch.float32)
             text_ids = text_ids.to(device)
 
@@ -237,13 +260,32 @@ def train(args):
                 )
 
             scaler.scale(loss).backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+            total_norm = torch.nn.utils.clip_grad_norm_(
+                model.parameters(), args.grad_clip
+            ).item()
             scaler.step(opt)
             scaler.update()
             opt.zero_grad(set_to_none=True)
 
-            if global_step % args.log_every == 0:
-                print(f"epoch {epoch} step {global_step}  loss {loss.item():.4f}")
+            if not args.no_tqdm:
+                mem = (
+                    torch.cuda.memory_reserved() / 1e6 if device.type == "cuda" else 0.0
+                )
+                data_iter.set_postfix(
+                    loss=f"{loss.item():.4f}",
+                    gnorm=f"{total_norm:.2f}",
+                    lr=f"{opt.param_groups[0]['lr']:.2e}",
+                    mem=f"{mem:.2f} MB",
+                )
+            else:
+                if global_step % args.log_every == 0:
+                    print(
+                        f"epoch {epoch + 1} | step {global_step} | loss {loss.item():.4f} | gnorm {total_norm:.2f}"
+                    )
+
+            # if global_step % args.log_every == 0:
+            #    print(f"epoch {epoch} step {global_step}  loss {loss.item():.4f}")
+
             global_step += 1
 
         # (optional) save checkpoint per epoch
@@ -321,7 +363,10 @@ def parse_args(args=None):
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--grad-clip", type=float, default=1.0)
     p.add_argument("--amp", action="store_true", help="Enable mixed precision")
+
+    # logging
     p.add_argument("--log-every", type=int, default=50)
+    p.add_argument("--no-tqdm", action="store_true", help="Disable tqdm progress bars")
 
     # image + patch
     p.add_argument("--height", type=int, default=100)
@@ -347,6 +392,6 @@ if __name__ == "__main__":
         --log-every 50
     """
     args = parse_args(
-        args=list(filter(lambda x: x != "", args.split())),
+        # args=list(filter(lambda x: x != "", args.split())),
     )
     train(args)

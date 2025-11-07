@@ -11,4 +11,5 @@ dependencies = [
     # Normal Deps
     "numpy>=2.3",
     "pillow>=12.0",
+    "tqdm>=4.67",
 ]
