@@ -437,7 +437,7 @@ def train(args):
             },
             ckpt_path,
         )
-        (print if args.no_tqdm else tqdm.write)(f"Saved to '{ckpt_path}'")
+        (print if args.no_tqdm else tqdm.write)(f"Saved curr to '{ckpt_path}'")
 
         # improve with `validation`
         improved = (seq_acc > best_seq_acc) if val_loader is not None else True
@@ -449,7 +449,7 @@ def train(args):
                 torch.load(ckpt_path, map_location="cpu"), best_ckpt_path
             )  # copy last->best
             (print if args.no_tqdm else tqdm.write)(
-                f"Saved best: seq_acc={seq_acc:.3f}, tok_acc={tok_acc:.3f}, val_loss={val_loss:.4f}"
+                f"Saved best to '{best_ckpt_path}' (seq_acc={seq_acc:.3f}, tok_acc={tok_acc:.3f}, val_loss={val_loss:.4f})"
             )
         else:
             epochs_no_improve += 1
@@ -574,10 +574,6 @@ def parse_args(args=None):
 
 
 if __name__ == "__main__":
-    args = """
-        --data ./data/
-        --batch-size 16
-    """
     args = parse_args(
         # args=list(filter(lambda x: x != "", args.split())),
     )
