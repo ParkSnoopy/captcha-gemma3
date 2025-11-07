@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from util import RoPECache, rotate_half
+from util import RoPECache, apply_rope_single
 
 from dataclasses import dataclass
 from typing import Optional, Tuple
@@ -103,9 +103,8 @@ class GQAAttention(nn.Module):
         cos_q = cos_k[:, :, -T_q:, :]  # [1,1,T_q,D]
         sin_q = sin_k[:, :, -T_q:, :]
 
-        # Apply RoPE with full head_dim (no half-splitting)
-        q = (q * cos_q) + (rotate_half(q) * sin_q)
-        k = (k * cos_k) + (rotate_half(k) * sin_k)
+        q = apply_rope_single(q, cos_q, sin_q)
+        k = apply_rope_single(k, cos_k, sin_k)
 
         # Optional QK norm
         if self.qk_norm is not None:
@@ -124,19 +123,22 @@ class GQAAttention(nn.Module):
 
         # Masks
         if self.is_local and self.window is not None and (kv is None):
-            bad = self._sliding_window_mask(att.size(-1), device)  # prefill: T_q==T_kv
+            i = torch.arange(att.size(-1), device=device)
+            j = torch.arange(att.size(-1), device=device)
+            bad = (i.unsqueeze(1) - j.unsqueeze(0) < 0) | (
+                i.unsqueeze(1) - j.unsqueeze(0) > self.window
+            )
             att = att.masked_fill(bad.unsqueeze(0).unsqueeze(0), float("-inf"))
         else:
-            i = torch.arange(att.size(-2), device=device)  # T_q
-            j = torch.arange(att.size(-1), device=device)  # T_kv
-            causal = j > i.unsqueeze(-1)
-            att = att.masked_fill(causal.unsqueeze(0).unsqueeze(0), float("-inf"))
+            i = torch.arange(att.size(-2), device=device)
+            j = torch.arange(att.size(-1), device=device)
+            att = att.masked_fill(
+                (j > i.unsqueeze(-1)).unsqueeze(0).unsqueeze(0), float("-inf")
+            )
 
         p = F.softmax(att, dim=-1)
         p = self.attn_drop(p)
-        y = torch.matmul(p, v)  # [B,H,T_q,D]
-
-        y = y.transpose(1, 2).contiguous().view(B, T_q, H * D)
+        y = torch.matmul(p, v).transpose(1, 2).contiguous().view(B, T_q, H * D)
         y = self.wo(y)
 
         # Trim cache if sliding window

@@ -7,10 +7,22 @@ def rotate_half(x):
     return torch.cat((-x2, x1), dim=-1)
 
 
+def apply_rope_single(x, cos, sin):
+    """
+    Apply RoPE to a single tensor.
+    x:   [B, H, T, D]
+    cos/sin: broadcastable to x (usually [1,1,T,D])
+    """
+    # why: lets q and k use different time indices during incremental decode
+    return (x * cos) + (rotate_half(x) * sin)
+
+
 def apply_rope(q, k, cos, sin):
-    # q,k: [B, n_heads, T, head_dim], cos/sin broadcastable to that
-    q_ = (q * cos) + (rotate_half(q) * sin)
-    k_ = (k * cos) + (rotate_half(k) * sin)
+    """
+    Legacy pair-wise API (same cos/sin for both). Kept for compatibility.
+    """
+    q_ = apply_rope_single(q, cos, sin)
+    k_ = apply_rope_single(k, cos, sin)
     return q_, k_
 
 
@@ -44,20 +56,12 @@ class RoPECache:
         theta = 1.0 / (
             base ** (torch.arange(0, half, dtype=torch.float32, device=device) / half)
         )
-        # positions: [max_len, 1]
-        pos = torch.arange(max_len, device=device, dtype=torch.float32).unsqueeze(
-            1
-        )  # [T, 1]
-        freqs = pos * theta  # [T, half]
-        self.cos = torch.cos(freqs).repeat_interleave(2, dim=1)  # [T, head_dim]
+        pos = torch.arange(max_len, device=device, dtype=torch.float32).unsqueeze(1)
+        freqs = pos * theta
+        self.cos = torch.cos(freqs).repeat_interleave(2, dim=1)
         self.sin = torch.sin(freqs).repeat_interleave(2, dim=1)
 
     def get(self, t: int):
-        # from:
-        # cos = self.cos[:t].unsqueeze(1).unsqueeze(1)
-        # sin = self.sin[:t].unsqueeze(1).unsqueeze(1)
-
-        # to (shapes -> [1,1,T,D]):
-        cos = self.cos[:t].unsqueeze(0).unsqueeze(0)
+        cos = self.cos[:t].unsqueeze(0).unsqueeze(0)  # [1,1,T,D]
         sin = self.sin[:t].unsqueeze(0).unsqueeze(0)
         return cos, sin
