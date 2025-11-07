@@ -1,3 +1,4 @@
+import os
 import random
 import argparse
 from tqdm.auto import tqdm, trange
@@ -130,14 +131,23 @@ class CaptchaDataset(Dataset):
 def collate_fn(batch, stoi: dict):
     xs, ys = zip(*batch)
     x = torch.stack(xs, dim=0)  # [B,1,H,W]
-    # Build text ids: [BOS] + label_chars
     bos_id = stoi[BOS_TOKEN]
     text_ids = []
     for lab in ys:
         seq = [bos_id] + [stoi[c] for c in lab]
         text_ids.append(torch.tensor(seq, dtype=torch.long))
     text = torch.stack(text_ids, dim=0)  # [B, 1+4]
-    return x, text, ys  # xs, tokenized text, and raw labels for debug
+    return x, text, ys
+
+
+class Collate:
+    """Windows-picklable collate wrapper (why: avoid lambda/closure in DataLoader)."""
+
+    def __init__(self, stoi: dict):
+        self.stoi = stoi
+
+    def __call__(self, batch):
+        return collate_fn(batch, self.stoi)
 
 
 # -----------------------
@@ -184,14 +194,29 @@ def make_dataloaders(args, device):
         n_train = len(ds) - n_val
         train_set, val_set = random_split(ds, [n_train, n_val], generator=g)
 
+    # ---- Windows/CPU safe DataLoader settings ----
+    is_windows = os.name == "nt"
+    on_cuda = device.type == "cuda"
+    # Workers: 0 on Windows or CPU; otherwise modest parallelism
+    train_workers = 0 if (is_windows or not on_cuda) else 4
+    val_workers = 0 if (is_windows or not on_cuda) else 2
+    # Pin memory only helps on CUDA
+    pin = on_cuda
+    # persistent_workers must be False when num_workers == 0
+    train_persistent = train_workers > 0
+    val_persistent = val_workers > 0
+
+    collate = Collate(stoi)
+
     train_loader = DataLoader(
         train_set,
         batch_size=args.batch_size,
         shuffle=True,
-        num_workers=4,
-        pin_memory=(device.type == "cuda"),
-        collate_fn=lambda b: collate_fn(b, stoi),
+        num_workers=train_workers,
+        pin_memory=pin,
+        collate_fn=collate,  # <-- no lambda
         drop_last=True,
+        persistent_workers=train_persistent,
     )
     val_loader = None
     if val_set is not None:
@@ -199,10 +224,11 @@ def make_dataloaders(args, device):
             val_set,
             batch_size=args.batch_size,
             shuffle=False,
-            num_workers=2,
-            pin_memory=(device.type == "cuda"),
-            collate_fn=lambda b: collate_fn(b, stoi),
+            num_workers=val_workers,
+            pin_memory=pin,
+            collate_fn=collate,  # <-- same wrapper
             drop_last=False,
+            persistent_workers=val_persistent,
         )
     return train_loader, val_loader, itos, stoi
 
