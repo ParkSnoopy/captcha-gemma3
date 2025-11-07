@@ -283,22 +283,24 @@ def predict_batch(
     vtok = patcher(images.to(device=device, dtype=torch.float32))  # [B, V, d]
     B = images.size(0)
 
-    # Autoregressive greedy decode for exactly 4 chars
+    # 2) step 0: feed BOS + vision (no cache yet)
     seq = torch.full((B, 1), bos_id, dtype=torch.long, device=device)  # [B,1]
-    outputs = []
-    kv_cache = None
-    for t in range(max_len):
-        logits, kv_cache = model(input_ids=seq, vision_embeds=vtok, kv_cache=kv_cache)
-        next_logits = logits[:, -1, :]  # [B, vocab]
-        next_id = next_logits[:, 2:].argmax(dim=-1) + 2  # skip PAD(0), BOS(1)
-        seq = torch.cat([seq, next_id.unsqueeze(1)], dim=1)
-        outputs.append(next_id)
+    logits, kv_cache = model(input_ids=seq, vision_embeds=vtok, kv_cache=None)
+    next_id = logits[:, -1, 2:].argmax(dim=-1) + 2  # skip PAD=0, BOS=1
+    out_ids = [next_id]
 
-    outputs = torch.stack(outputs, dim=1)  # [B, 4]
-    preds = []
-    for b in range(B):
-        chars = [itos[idx.item()] for idx in outputs[b]]
-        preds.append("".join(chars))
+    # 3) remaining steps: feed only the last generated token; no vision
+    for _ in range(1, max_len):
+        logits, kv_cache = model(
+            input_ids=next_id.unsqueeze(1),  # [B,1]
+            vision_embeds=None,  # <- important: don't re-add vision
+            kv_cache=kv_cache,
+        )
+        next_id = logits[:, -1, 2:].argmax(dim=-1) + 2
+        out_ids.append(next_id)
+
+    outputs = torch.stack(out_ids, dim=1)  # [B, 4]
+    preds = ["".join(itos[i.item()] for i in row) for row in outputs]
     return preds
 
 

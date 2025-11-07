@@ -122,6 +122,9 @@ class GQAAttention(nn.Module):
         if self.qk_norm is not None:
             q, k = self.qk_norm(q, k)
 
+        # ---- keep HK version for the cache ----
+        k_cache, v_cache = k, v
+
         # Expand K/V across query heads (GQA): map hk -> h by repeating groups
         # (each group of query heads shares one K/V head)
         if H != HK:
@@ -132,14 +135,14 @@ class GQAAttention(nn.Module):
         att = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(D)  # [B, H, T, T_kv]
 
         # Masks: causal + optional sliding window
-        if self.is_local and self.window is not None:
+        if self.is_local and self.window is not None and (kv is None):
             bad = self._sliding_window_mask(
                 att.size(-1), device
             )  # [T_kv, T_kv] but we query full prefixes
             # We need mask aligned on [T (query), T_kv (key)]. For autoregressive prefill, T==T_kv.
             att = att.masked_fill(bad.unsqueeze(0).unsqueeze(0), float("-inf"))
         else:
-            # causal mask (no future)
+            # generic causal mask for any (T, T_kv)
             i = torch.arange(att.size(-2), device=device)
             j = torch.arange(att.size(-1), device=device)
             causal = j > i.unsqueeze(-1)
@@ -151,12 +154,12 @@ class GQAAttention(nn.Module):
         y = y.transpose(1, 2).contiguous().view(B, T, H * D)
         y = self.wo(y)
 
-        # For local layers we can drop old cache beyond window to save memory
-        if self.is_local and self.window is not None and k.size(2) > self.window:
-            k = k[:, :, -self.window :]
-            v = v[:, :, -self.window :]
+        # trim cache time dimension on the HK version
+        if self.is_local and self.window is not None and k_cache.size(2) > self.window:
+            k_cache = k_cache[:, :, -self.window :]
+            v_cache = v_cache[:, :, -self.window :]
 
-        return y, (k, v)
+        return y, (k_cache, v_cache)
 
 
 class SwiGLU(nn.Module):
