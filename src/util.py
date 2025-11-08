@@ -4,7 +4,15 @@ import torch.nn.functional as F
 
 from typing import Tuple, List
 
-from config import BOS_TOKEN
+
+def build_vocab(charset: str):
+    itos = list(charset)
+    stoi = {ch: i for i, ch in enumerate(itos)}
+    return itos, stoi
+
+
+def encode_text(text: str, stoi: dict) -> List[int]:
+    return [stoi[c] for c in text]
 
 
 def rotate_half(x):
@@ -78,10 +86,9 @@ class RoPECache:
 def collate_fn(batch, stoi: dict):
     xs, ys = zip(*batch)
     x = torch.stack(xs, dim=0)  # [B,1,H,W]
-    bos_id = stoi[BOS_TOKEN]
     text_ids = []
     for lab in ys:
-        seq = [bos_id] + [stoi[c] for c in lab]
+        seq = [stoi[c] for c in lab]
         text_ids.append(torch.tensor(seq, dtype=torch.long))
     text = torch.stack(text_ids, dim=0)  # [B, 1+4]
     return x, text, ys

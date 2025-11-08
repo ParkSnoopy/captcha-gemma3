@@ -9,19 +9,9 @@ import random
 from pathlib import Path
 from typing import List
 
-from config import DEFAULT_CHARSET, PAD_TOKEN, BOS_TOKEN
-from util import compute_autoregressive_loss, token_and_seq_accuracy
-from model import Gemma3Model, Collate, PatchEmbed, CaptchaDataset
-
-
-def build_vocab(charset: str):
-    itos = [PAD_TOKEN, BOS_TOKEN] + list(charset)
-    stoi = {ch: i for i, ch in enumerate(itos)}
-    return itos, stoi
-
-
-def encode_text(text: str, stoi: dict) -> List[int]:
-    return [stoi[c] for c in text]
+from config import DEFAULT_CHARSET
+from util import Collate, compute_autoregressive_loss, token_and_seq_accuracy
+from model import Gemma3Model, PatchEmbed, CaptchaDataset
 
 
 # ---- data helpers ----
