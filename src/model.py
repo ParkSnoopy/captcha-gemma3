@@ -1,10 +1,105 @@
 import torch
 import torch.nn as nn
+from torch.utils.data import Dataset
+from torchvision.transforms.functional import to_tensor
 
-from util import RMSNorm
+from PIL import Image
+
+from pathlib import Path
+from typing import Optional
+
+from util import RMSNorm, build_vocab
 from attn import GQAAttention, AttnConfig, SwiGLU
 
-from typing import Optional
+
+# -----------------------
+# Vision Patch Embedder
+# -----------------------
+class PatchEmbed(nn.Module):
+    """
+    Simple non-pretrained patch embedder that converts a (B,1,H,W) grayscale image
+    into a sequence of tokens of dimension d_model. For (H,W)=(100,250) and patch=10,
+    tokens = (H/10)*(W/10) = 10*25 = 250.
+    """
+
+    def __init__(self, img_size=(100, 250), patch=10, in_chans=1, d_model=512):
+        super().__init__()
+        H, W = img_size
+        assert H % patch == 0 and W % patch == 0, (
+            "Image size must be divisible by patch size"
+        )
+        self.grid_h = H // patch
+        self.grid_w = W // patch
+        self.tokens = self.grid_h * self.grid_w
+        self.proj = nn.Conv2d(
+            in_chans, d_model, kernel_size=patch, stride=patch, bias=False
+        )
+        self.norm = nn.LayerNorm(d_model)
+
+    def forward(self, x):
+        # x: [B,1,H,W]
+        y = self.proj(x)  # [B, d_model, H', W']
+        y = y.permute(0, 2, 3, 1)  # [B, H', W', d_model]
+        y = y.reshape(y.size(0), -1, y.size(-1))  # [B, tokens, d_model]
+        y = self.norm(y)
+        return y
+
+
+# -----------------------
+# Dataset
+# -----------------------
+class CaptchaDataset(Dataset):
+    def __init__(self, root: str, charset: str, img_size=(100, 250)):
+        self.root = Path(root)
+        self.img_size = img_size
+        self.charset = charset
+        self.itos, self.stoi = build_vocab(charset)
+
+        self.items = []
+
+        # parse label from filename stem (e.g., "AB1C.png" -> "AB1C")
+        img_glob = list(
+            self.root.glob("*.png")
+        )  # only `png` for now # + list(self.root.glob("*.jpg")) + list(self.root.glob("*.jpeg"))
+        for p in sorted(img_glob):
+            label = p.stem.split(".")[
+                0
+            ]  # assume first segment separated by '.' is the label
+            self.items.append((p, label))
+
+        # keep only items with 4-char labels that exist in charset
+        valid = []
+        allowed = set(charset)
+        for p, lab in self.items:
+            if len(lab) == 4 and all(c in allowed for c in lab):
+                valid.append((p, lab))
+        self.items = valid
+
+        if len(self.items) == 0:
+            raise RuntimeError(
+                "No valid samples found. Ensure images exist and labels are 4 chars inside charset."
+            )
+
+    def __len__(self):
+        return len(self.items)
+
+    def _load_img(self, path: Path):
+        # grayscale, resize to (H,W) = (100,250)
+        img = (
+            Image.open(path)
+            .convert("L")
+            .resize(
+                (self.img_size[1], self.img_size[0]), Image.BILINEAR
+            )  # (W,H) for PIL
+        )
+        x = to_tensor(img)  # -> [1, H, W], float32 in [0,1]
+        return x
+
+    def __getitem__(self, idx):
+        path, label = self.items[idx]
+        x = self._load_img(path)  # [1,H,W]
+        y = label
+        return x, y
 
 
 class Gemma3Block(nn.Module):

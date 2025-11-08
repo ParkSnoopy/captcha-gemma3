@@ -1,13 +1,14 @@
+import torch
+from torchvision.transforms.functional import to_tensor
+
 import argparse
+from PIL import Image
+
 import os
 from pathlib import Path
 
-import torch
-from torchvision.transforms.functional import to_tensor
-from PIL import Image
-
-from model import Gemma3Model
-from train_captcha import PatchEmbed, predict_batch  # from the script you trained with
+from model import Gemma3Model, PatchEmbed
+from train import predict_batch
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

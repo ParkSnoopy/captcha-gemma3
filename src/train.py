@@ -1,28 +1,17 @@
-import os
-import random
+import torch
+from torch.utils.data import DataLoader, random_split
+
 import argparse
 from tqdm.auto import tqdm, trange
 
+import os
+import random
 from pathlib import Path
-from typing import List, Tuple
+from typing import List
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader, random_split
-from torchvision.transforms.functional import to_tensor
-from PIL import Image
-
-# Import your model code
-from model import Gemma3Model
-
-# -----------------------
-# Charset / Tokenization
-# -----------------------
-# Default: 10 digits + 26 uppercase letters
-DEFAULT_CHARSET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-PAD_TOKEN = "<pad>"
-BOS_TOKEN = "<bos>"
+from config import DEFAULT_CHARSET, PAD_TOKEN, BOS_TOKEN
+from util import compute_autoregressive_loss, token_and_seq_accuracy
+from model import Gemma3Model, Collate, PatchEmbed, CaptchaDataset
 
 
 def build_vocab(charset: str):
@@ -33,148 +22,6 @@ def build_vocab(charset: str):
 
 def encode_text(text: str, stoi: dict) -> List[int]:
     return [stoi[c] for c in text]
-
-
-# -----------------------
-# Vision Patch Embedder
-# -----------------------
-class PatchEmbed(nn.Module):
-    """
-    Simple non-pretrained patch embedder that converts a (B,1,H,W) grayscale image
-    into a sequence of tokens of dimension d_model. For (H,W)=(100,250) and patch=10,
-    tokens = (H/10)*(W/10) = 10*25 = 250.
-    """
-
-    def __init__(self, img_size=(100, 250), patch=10, in_chans=1, d_model=512):
-        super().__init__()
-        H, W = img_size
-        assert H % patch == 0 and W % patch == 0, (
-            "Image size must be divisible by patch size"
-        )
-        self.grid_h = H // patch
-        self.grid_w = W // patch
-        self.tokens = self.grid_h * self.grid_w
-        self.proj = nn.Conv2d(
-            in_chans, d_model, kernel_size=patch, stride=patch, bias=False
-        )
-        self.norm = nn.LayerNorm(d_model)
-
-    def forward(self, x):
-        # x: [B,1,H,W]
-        y = self.proj(x)  # [B, d_model, H', W']
-        y = y.permute(0, 2, 3, 1)  # [B, H', W', d_model]
-        y = y.reshape(y.size(0), -1, y.size(-1))  # [B, tokens, d_model]
-        y = self.norm(y)
-        return y
-
-
-# -----------------------
-# Dataset
-# -----------------------
-class CaptchaDataset(Dataset):
-    def __init__(self, root: str, charset: str, img_size=(100, 250)):
-        self.root = Path(root)
-        self.img_size = img_size
-        self.charset = charset
-        self.itos, self.stoi = build_vocab(charset)
-
-        self.items = []
-
-        # parse label from filename stem (e.g., "AB1C.png" -> "AB1C")
-        img_glob = list(
-            self.root.glob("*.png")
-        )  # only `png` for now # + list(self.root.glob("*.jpg")) + list(self.root.glob("*.jpeg"))
-        for p in sorted(img_glob):
-            label = p.stem.split(".")[
-                0
-            ]  # assume first segment separated by '.' is the label
-            self.items.append((p, label))
-
-        # keep only items with 4-char labels that exist in charset
-        valid = []
-        allowed = set(charset)
-        for p, lab in self.items:
-            if len(lab) == 4 and all(c in allowed for c in lab):
-                valid.append((p, lab))
-        self.items = valid
-
-        if len(self.items) == 0:
-            raise RuntimeError(
-                "No valid samples found. Ensure images exist and labels are 4 chars inside charset."
-            )
-
-    def __len__(self):
-        return len(self.items)
-
-    def _load_img(self, path: Path):
-        # grayscale, resize to (H,W) = (100,250)
-        img = (
-            Image.open(path)
-            .convert("L")
-            .resize(
-                (self.img_size[1], self.img_size[0]), Image.BILINEAR
-            )  # (W,H) for PIL
-        )
-        x = to_tensor(img)  # -> [1, H, W], float32 in [0,1]
-        return x
-
-    def __getitem__(self, idx):
-        path, label = self.items[idx]
-        x = self._load_img(path)  # [1,H,W]
-        y = label
-        return x, y
-
-
-# -----------------------
-# Collate
-# -----------------------
-def collate_fn(batch, stoi: dict):
-    xs, ys = zip(*batch)
-    x = torch.stack(xs, dim=0)  # [B,1,H,W]
-    bos_id = stoi[BOS_TOKEN]
-    text_ids = []
-    for lab in ys:
-        seq = [bos_id] + [stoi[c] for c in lab]
-        text_ids.append(torch.tensor(seq, dtype=torch.long))
-    text = torch.stack(text_ids, dim=0)  # [B, 1+4]
-    return x, text, ys
-
-
-class Collate:
-    """Windows-picklable collate wrapper (why: avoid lambda/closure in DataLoader)."""
-
-    def __init__(self, stoi: dict):
-        self.stoi = stoi
-
-    def __call__(self, batch):
-        return collate_fn(batch, self.stoi)
-
-
-# -----------------------
-# Loss helper
-# -----------------------
-def compute_autoregressive_loss(logits, text_ids, vision_len, ignore_index=-100):
-    """
-    logits: [B, V+T, vocab]
-    text_ids: [B, T] (BOS + 4 chars)  -> we want to predict the last T-1 tokens (the 4 chars) conditioned on BOS
-    Only compute loss on the text region; ignore all vision positions.
-    """
-    B, S, V = logits.shape
-    T = text_ids.size(1)  # 1+4
-    # shift as usual: logits[:-1] vs targets[1:]
-    logits_shift = logits[:, :-1, :]  # [B, S-1, V]
-    # Build "global tokens" stream indices: vision placeholders + text_ids
-    # We only need targets for the text region; everything else = ignore_index
-    targets = torch.full(
-        (B, S - 1), ignore_index, dtype=torch.long, device=logits.device
-    )
-    # the first text position to supervise in logits_shift is index = vision_len
-    # we have T-1 targets (exclude BOS)
-    targets[:, vision_len : vision_len + (T - 1)] = text_ids[:, 1:]  # [B, 4]
-    loss = F.cross_entropy(
-        logits_shift.reshape(-1, V), targets.reshape(-1), ignore_index=ignore_index
-    )
-    return loss
 
 
 # ---- data helpers ----
@@ -233,18 +80,6 @@ def make_dataloaders(args, device):
     return train_loader, val_loader, itos, stoi
 
 
-# ---- metrics ----
-def token_and_seq_accuracy(preds: List[str], targets: List[str]) -> Tuple[float, float]:
-    correct_seq = sum(p == t for p, t in zip(preds, targets))
-    seq_acc = correct_seq / max(1, len(preds))
-    total_tok = sum(len(t) for t in targets)
-    correct_tok = sum(
-        sum(pi == ti for pi, ti in zip(p, t)) for p, t in zip(preds, targets)
-    )
-    tok_acc = correct_tok / max(1, total_tok)
-    return tok_acc, seq_acc
-
-
 # ---- validation loop ----
 @torch.no_grad()
 def validate(model, patcher, loader, stoi, itos, device, max_len=4, no_tqdm=False):
@@ -299,8 +134,8 @@ def train(args):
 
     # Vision tokens via PatchEmbed
     patcher = PatchEmbed(
-        img_size=(args.height, args.width),
         patch=args.patch,
+        img_size=(args.height, args.width),
         in_chans=args.n_channels,
         d_model=args.d_model,
     ).to(device)
@@ -506,19 +341,6 @@ def predict_batch(
     outputs = torch.stack(out_ids, dim=1)  # [B, max_len]
     preds = ["".join(itos[i.item()] for i in row) for row in outputs]
     return preds
-
-
-"""
-def debug_first_step_logits(images, model, patcher, stoi, k=5, device="cpu"):
-    with torch.no_grad():
-        bos_id = stoi["<bos>"]
-        vtok = patcher(images.to(device=device, dtype=torch.float32))
-        seq = torch.full((images.size(0), 1), bos_id, dtype=torch.long, device=device)
-        logits, _ = model(input_ids=seq, vision_embeds=vtok, kv_cache=None)
-        log = logits[:, -1, :].mean(dim=0)  # mean over batch
-        top = torch.topk(log, k)
-        return [(i.item(), float(v)) for v, i in zip(top.values, top.indices)]
-"""
 
 
 def parse_args(args=None):
