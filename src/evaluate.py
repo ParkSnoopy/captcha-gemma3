@@ -62,7 +62,7 @@ def evaluation(cli_args):
         img = Image.open(path).convert("L").resize((W, H))
         return to_tensor(img)  # [1,H,W], float32 in [0,1]
 
-    image_paths = Path(cli_args.eval_target)
+    image_paths = Path(cli_args.data)
     image_paths = (
         list(image_paths.glob("*.png"))
         + list(image_paths.glob("*.jpg"))
@@ -85,7 +85,7 @@ def parse_args(args=None):
         required=True,
     )
     p.add_argument(
-        "--eval-target",
+        "--data",
         type=str,
         required=True,
     )
@@ -96,7 +96,7 @@ def parse_args(args=None):
 if __name__ == "__main__":
     args = """
         --use-checkpoint ./checkpoints/captcha_gemma3_e5.pt
-        --eval-target ./data.eval/
+        --data ./data.eval/
     """
     args = parse_args(
         # args=list(filter(lambda x: x != "", args.split())),
