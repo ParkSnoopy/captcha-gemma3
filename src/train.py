@@ -21,6 +21,7 @@ def make_dataloaders(args, device):
         args.data,
         charset=DEFAULT_CHARSET,
         img_size=(args.height, args.width),
+        img_channels=args.n_channels,
     )
     itos, stoi = ds.itos, ds.stoi
 

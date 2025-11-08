@@ -49,10 +49,11 @@ class PatchEmbed(nn.Module):
 # Dataset
 # -----------------------
 class CaptchaDataset(Dataset):
-    def __init__(self, root: str, charset: str, img_size=(100, 250)):
+    def __init__(self, root: str, charset: str, img_size=(100, 250), img_channels=3):
         self.root = Path(root)
-        self.img_size = img_size
         self.charset = charset
+        self.img_size = img_size
+        self.img_channels = img_channels
         self.itos, self.stoi = build_vocab(charset)
 
         self.items = []
@@ -87,7 +88,7 @@ class CaptchaDataset(Dataset):
         # grayscale, resize to (H,W) = (100,250)
         img = (
             Image.open(path)
-            .convert("L")
+            .convert("RGB" if self.img_channels == 3 else "L")
             .resize(
                 (self.img_size[1], self.img_size[0]), Image.BILINEAR
             )  # (W,H) for PIL
