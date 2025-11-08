@@ -377,6 +377,8 @@ def parse_args(args=None):
     p.add_argument("--val-split", type=float, default=0.1)
     p.add_argument("--val-patience", type=int, default=3)
 
+    p.add_argument("--on-notebook", action="store_true")
+
     args = p.parse_args() if args is None else p.parse_args(args)
     args.no_val = args.val_split <= 0.0
     args.train_patience = int(min(args.epochs, args.train_patience))
@@ -388,4 +390,11 @@ if __name__ == "__main__":
     args = parse_args(
         # args=list(filter(lambda x: x != "", args.split())),
     )
+
+    if args.on_notebook:
+        import tqdm.notebook as nb
+        global tqdm, trange
+        tqdm = nb.tqdm
+        trange = nb.trange
+
     train(args)
