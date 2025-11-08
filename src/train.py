@@ -129,7 +129,9 @@ def train(args):
         d_model=args.d_model,
     ).to(device)
     vision_tokens = patcher.tokens
+    max_seq_len = max(1024, vision_tokens + 16)
     print(f"Vision tokens per image: {vision_tokens}")
+    print(f"Max sequence length: {max_seq_len}")
 
     # Model
     model = Gemma3Model(
@@ -138,7 +140,7 @@ def train(args):
         n_layers=args.n_layers,
         n_heads=args.n_heads,
         n_kv_heads=args.n_kv_heads,
-        max_seq_len=max(1024, vision_tokens + 16),
+        max_seq_len=max_seq_len,
         local_window=args.local_window,
         l2g=args.l2g,
         attn_dropout=args.dropout,
@@ -253,7 +255,8 @@ def train(args):
                 "patcher": patcher.state_dict(),
                 "stoi": stoi,
                 "itos": itos,
-                "args": vars(args) | {"vision_tokens": vision_tokens},
+                "args": vars(args)
+                | {"vision_tokens": vision_tokens, "max_seq_len": max_seq_len},
                 "epoch": epoch + 1,
                 "val_loss": val_loss,
                 "val_tok_acc": tok_acc,
@@ -315,7 +318,7 @@ def predict_batch(
     next_id = pick_next(logits[:, -1, :])
     out_ids = [next_id]
 
-    for _ in range(1, max_len):
+    for i in range(1, max_len):
         logits, kv_cache = model(
             input_ids=next_id.unsqueeze(1),
             vision_embeds=None,
@@ -345,8 +348,8 @@ def parse_args(args=None):
     )
     p.add_argument("--epochs", type=int, default=5)
     p.add_argument("--batch-size", type=int, default=32)
-    p.add_argument("--learning-rate", type=float, default=3e-4)
-    p.add_argument("--weight-decay", type=float, default=0.1)
+    p.add_argument("--learning-rate", type=float, default=0.001)
+    p.add_argument("--weight-decay", type=float, default=0.001)
     p.add_argument("--grad-clip", type=float, default=1.0)
     p.add_argument("--dropout", type=float, default=0.0)
     p.add_argument("--amp", action="store_true", help="Enable mixed precision")
