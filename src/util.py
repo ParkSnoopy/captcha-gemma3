@@ -110,21 +110,26 @@ class Collate:
 def compute_autoregressive_loss(logits, text_ids, vision_len, ignore_index=-100):
     """
     logits: [B, V+T, vocab]
-    text_ids: [B, T] (BOS + 4 chars)  -> we want to predict the last T-1 tokens (the 4 chars) conditioned on BOS
-    Only compute loss on the text region; ignore all vision positions.
+    text_ids: [B, T] (4 chars; no BOS)
+    Supervise all T chars by aligning targets to positions starting at (vision_len-1),
+    so the first char is predicted from the last vision token.
     """
     B, S, V = logits.shape
-    T = text_ids.size(1)  # 1+4
-    # shift as usual: logits[:-1] vs targets[1:]
+    T = text_ids.size(1)
+
+    # Standard next-token shift on logits
     logits_shift = logits[:, :-1, :]  # [B, S-1, V]
-    # Build "global tokens" stream indices: vision placeholders + text_ids
-    # We only need targets for the text region; everything else = ignore_index
+
+    # Fill all non-text positions with ignore_index
     targets = torch.full(
         (B, S - 1), ignore_index, dtype=torch.long, device=logits.device
     )
-    # the first text position to supervise in logits_shift is index = vision_len
-    # we have T-1 targets (exclude BOS)
-    targets[:, vision_len : vision_len + (T - 1)] = text_ids[:, 1:]  # [B, 4]
+
+    # Align: first supervised position is the last vision position
+    start = max(0, vision_len - 1)
+    end = start + T
+    targets[:, start:end] = text_ids[:, :]
+
     loss = F.cross_entropy(
         logits_shift.reshape(-1, V), targets.reshape(-1), ignore_index=ignore_index
     )

@@ -97,9 +97,7 @@ def validate(model, patcher, loader, stoi, itos, device, max_len=4, no_tqdm=Fals
         )
         preds_all.extend(batch_preds)
         # recover targets as strings
-        targs = [
-            "".join(itos[j.item()] for j in row[1 : 1 + max_len]) for row in text_ids
-        ]  # skip BOS
+        targs = ["".join(itos[j.item()] for j in row[:max_len]) for row in text_ids]
         targs_all.extend(targs)
     tok_acc, seq_acc = token_and_seq_accuracy(preds_all, targs_all)
     return float(sum(losses) / max(1, len(losses))), tok_acc, seq_acc
@@ -303,18 +301,15 @@ def predict_batch(
     device: str = "cpu",
 ):
     model.eval()
-    bos_id = stoi["<bos>"]
     vtok = patcher(images.to(device=device, dtype=torch.float32))
     B = images.size(0)
 
-    # prefill: BOS + vision
-    seq = torch.full((B, 1), bos_id, dtype=torch.long, device=device)
-    logits, kv_cache = model(input_ids=seq, vision_embeds=vtok, kv_cache=None)
+    # prefill: vision only (no BOS)
+    empty = torch.empty((B, 0), dtype=torch.long, device=device)
+    logits, kv_cache = model(input_ids=empty, vision_embeds=vtok, kv_cache=None)
 
     def pick_next(log):
-        # Why: avoid slicing bias; explicitly disallow PAD/BOS.
-        log = log.clone()
-        log[..., :2] = float("-inf")
+        # No special tokens to mask
         return log.argmax(dim=-1)
 
     next_id = pick_next(logits[:, -1, :])
