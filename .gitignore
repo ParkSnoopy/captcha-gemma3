@@ -12,3 +12,6 @@ wheels/
 # large binary
 data*/
 checkpoints*/
+*.png
+*.jpg
+*.pt

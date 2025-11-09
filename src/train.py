@@ -393,6 +393,7 @@ if __name__ == "__main__":
 
     if args.on_notebook:
         import tqdm.notebook as nb
+
         global tqdm, trange
         tqdm = nb.tqdm
         trange = nb.trange
